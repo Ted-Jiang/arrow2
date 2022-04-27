@@ -508,10 +508,12 @@ a contiguous in-memory representation, while <code>iter()</code> returns items t
 To get an iterator over contiguous values, use <code>array.values().iter()</code>.</p>
 <p>There is one last API that is worth mentioning, and that is <code>Bitmap::chunks</code>. When performing
 bitwise operations, it is often more performant to operate on chunks of bits
-instead of single bits. <code>chunks</code> offers a <code>TrustedLen</code> of <code>u64</code> with the bits
-+ an extra <code>u64</code> remainder. We expose two functions, <code>unary(Bitmap, Fn) -&gt; Bitmap</code>
+instead of single bits. <code>chunks</code> offers a <code>TrustedLen</code> of <code>u64</code> with the bits</p>
+<ul>
+<li>an extra <code>u64</code> remainder. We expose two functions, <code>unary(Bitmap, Fn) -&gt; Bitmap</code>
 and <code>binary(Bitmap, Bitmap, Fn) -&gt; Bitmap</code> that use this API to efficiently
-perform bitmap operations.</p>
+perform bitmap operations.</li>
+</ul>
 <h2 id="vectorized-operations"><a class="header" href="#vectorized-operations">Vectorized operations</a></h2>
 <p>One of the main advantages of the arrow format and its memory layout is that
 it often enables SIMD. For example, an unary operation <code>op</code> on a <code>PrimitiveArray</code>
@@ -842,6 +844,7 @@ fn read_ipc(buf: &amp;[u8]) -&gt; Result&lt;Chunk&lt;Arc&lt;dyn Array&gt;&gt;&gt
 <li>Parquet (<code>io_parquet</code>)</li>
 <li>JSON and NDJSON (<code>io_json</code>)</li>
 <li>Avro (<code>io_avro</code> and <code>io_avro_async</code>)</li>
+<li>ODBC-compliant databases (<code>io_odbc</code>)</li>
 </ul>
 <p>In this section you can find a guide and examples for each one of them.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="csv-reader"><a class="header" href="#csv-reader">CSV reader</a></h1>
@@ -1113,7 +1116,7 @@ fn parallel_write(path: &amp;str, batches: [Chunk&lt;Arc&lt;dyn Array&gt;&gt;; 2
     for _ in 0..2 {
         // block: assumes that the order of batches matter.
         let records = rx.recv().unwrap();
-        records.iter().try_for_each(|row| writer.write_all(&amp;row))?
+        records.iter().try_for_each(|row| writer.write_all(row))?
     }
 
     for child in children {
@@ -1164,10 +1167,20 @@ fn main() -&gt; Result&lt;()&gt; {
     let reader = File::open(file_path)?;
     let reader = read::FileReader::try_new(reader, None, None, None, None)?;
 
+    println!(&quot;{:#?}&quot;, reader.schema());
+
+    // say we want to evaluate if the we can skip some row groups based on a field's value
+    let field = &amp;reader.schema().fields[0];
+
+    // we can deserialize the parquet statistics from this field
+    let statistics = read::statistics::deserialize(field, &amp;reader.metadata().row_groups)?;
+
+    println!(&quot;{:#?}&quot;, statistics);
+
     let start = SystemTime::now();
     for maybe_chunk in reader {
-        let columns = maybe_chunk?;
-        assert!(!columns.is_empty());
+        let chunk = maybe_chunk?;
+        assert!(!chunk.is_empty());
     }
     println!(&quot;took: {} ms&quot;, start.elapsed().unwrap().as_millis());
     Ok(())
@@ -1263,14 +1276,14 @@ use arrow2::{
     datatypes::{Field, Schema},
     error::Result,
     io::parquet::write::{
-        Compression, Encoding, FileWriter, RowGroupIterator, Version, WriteOptions,
+        CompressionOptions, Encoding, FileWriter, RowGroupIterator, Version, WriteOptions,
     },
 };
 
 fn write_batch(path: &amp;str, schema: Schema, columns: Chunk&lt;Arc&lt;dyn Array&gt;&gt;) -&gt; Result&lt;()&gt; {
     let options = WriteOptions {
         write_statistics: true,
-        compression: Compression::Uncompressed,
+        compression: CompressionOptions::Uncompressed,
         version: Version::V2,
     };
 
@@ -1286,8 +1299,7 @@ fn write_batch(path: &amp;str, schema: Schema, columns: Chunk&lt;Arc&lt;dyn Arra
 
     writer.start()?;
     for group in row_groups {
-        let (group, len) = group?;
-        writer.write(group, len)?;
+        writer.write(group?)?;
     }
     let _size = writer.end(None)?;
     Ok(())
@@ -1366,7 +1378,7 @@ fn parallel_write(path: &amp;str, schema: &amp;Schema, batches: &amp;[Chunk]) -&
     // declare the options
     let options = WriteOptions {
         write_statistics: true,
-        compression: Compression::Snappy,
+        compression: CompressionOptions::Snappy,
         version: Version::V2,
     };
 
@@ -1419,8 +1431,7 @@ fn parallel_write(path: &amp;str, schema: &amp;Schema, batches: &amp;[Chunk]) -&
     // Write the file.
     writer.start()?;
     for group in row_groups {
-        let (group, len) = group?;
-        writer.write(group, len)?;
+        writer.write(group?)?;
     }
     let _size = writer.end(None)?;
 
